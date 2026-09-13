@@ -978,6 +978,65 @@ __device__ __forceinline__ bool fieldIsZero(const uint64_t a[4]) {
     return ( (a[0] | a[1] | a[2] | a[3]) == 0ULL );
 }
 
+#if defined(_WIN32)
+// Windows: MSVC als Host-Compiler kennt kein __int128. Dieselbe Rechnung mit 64 Bit und Uebertrag.
+#ifndef CYC_PORTABLE_CARRY
+#define CYC_PORTABLE_CARRY
+// a + b + cin (cin 0 oder 1), Uebertrag nach *cout
+static __host__ __device__ __forceinline__ uint64_t cyc_adc64(uint64_t a, uint64_t b, uint64_t cin, uint64_t* cout) {
+    uint64_t s = a + b;
+    uint64_t c = (s < a) ? 1ull : 0ull;
+    uint64_t r = s + cin;
+    c |= (r < s) ? 1ull : 0ull;
+    *cout = c;
+    return r;
+}
+// a - b - bin (bin 0 oder 1), Borgen nach *bout
+static __host__ __device__ __forceinline__ uint64_t cyc_sbb64(uint64_t a, uint64_t b, uint64_t bin, uint64_t* bout) {
+    uint64_t d = a - b;
+    uint64_t o = (a < b) ? 1ull : 0ull;
+    uint64_t r = d - bin;
+    o |= (d < bin) ? 1ull : 0ull;
+    *bout = o;
+    return r;
+}
+#endif
+
+__device__ void fieldAdd(const uint64_t a[4], const uint64_t b[4], uint64_t out[4]) {
+    uint64_t c = 0;
+    out[0] = cyc_adc64(a[0], b[0], 0ull, &c);
+    out[1] = cyc_adc64(a[1], b[1], c, &c);
+    out[2] = cyc_adc64(a[2], b[2], c, &c);
+    out[3] = cyc_adc64(a[3], b[3], c, &c);
+
+    if (c || (out[3] > SECP_P_LE[3]) ||
+        (out[3] == SECP_P_LE[3] && out[2] > SECP_P_LE[2]) ||
+        (out[3] == SECP_P_LE[3] && out[2] == SECP_P_LE[2] && out[1] > SECP_P_LE[1]) ||
+        (out[3] == SECP_P_LE[3] && out[2] == SECP_P_LE[2] && out[1] == SECP_P_LE[1] && out[0] >= SECP_P_LE[0])) {
+        uint64_t borrow = 0;
+        out[0] = cyc_sbb64(out[0], SECP_P_LE[0], 0ull, &borrow);
+        out[1] = cyc_sbb64(out[1], SECP_P_LE[1], borrow, &borrow);
+        out[2] = cyc_sbb64(out[2], SECP_P_LE[2], borrow, &borrow);
+        out[3] = cyc_sbb64(out[3], SECP_P_LE[3], borrow, &borrow);
+    }
+}
+
+__device__ void fieldSub(const uint64_t a[4], const uint64_t b[4], uint64_t out[4]) {
+    uint64_t borrow = 0;
+    out[0] = cyc_sbb64(a[0], b[0], 0ull, &borrow);
+    out[1] = cyc_sbb64(a[1], b[1], borrow, &borrow);
+    out[2] = cyc_sbb64(a[2], b[2], borrow, &borrow);
+    out[3] = cyc_sbb64(a[3], b[3], borrow, &borrow);
+
+    if (borrow) {
+        uint64_t carry = 0;
+        out[0] = cyc_adc64(out[0], SECP_P_LE[0], 0ull, &carry);
+        out[1] = cyc_adc64(out[1], SECP_P_LE[1], carry, &carry);
+        out[2] = cyc_adc64(out[2], SECP_P_LE[2], carry, &carry);
+        out[3] = cyc_adc64(out[3], SECP_P_LE[3], carry, &carry);
+    }
+}
+#else
 __device__ void fieldAdd(const uint64_t a[4], const uint64_t b[4], uint64_t out[4]) {
     __uint128_t t = 0;
     uint64_t c = 0;
@@ -1054,6 +1113,7 @@ __device__ void fieldSub(const uint64_t a[4], const uint64_t b[4], uint64_t out[
         out[3] = (uint64_t)tu;
     }
 }
+#endif
 
 __device__ void fieldNeg(const uint64_t a[4], uint64_t out[4]) {
     if (fieldIsZero(a)) {
