@@ -785,6 +785,7 @@ int main(int argc, char** argv) {
     bool stop_all = false;
     bool completed_all = false;
     uint64_t batches_done = resume_batches;   // per thread, for the checkpoint line
+    uint64_t lockstep_batches = resume_batches;   // expected batches per thread if all threads keep pace
     const long double resumed_keys_ld = (long double)resume_keys * (long double)threadsTotal;
     while (!stop_all) {
         if (g_sigint) std::cerr << "\n[Ctrl+C] Interrupt received. Finishing current kernel slice and exiting...\n";
@@ -850,26 +851,40 @@ int main(int argc, char** argv) {
             if (flag_after != FOUND_NONE) {
                 stop_all = true;
             } else {
-                // Threads do not always advance in lockstep: a thread that returns early (after a hash160
-                // prefix hit without full match) keeps its remaining count for this launch. A checkpoint
-                // must describe what EVERY thread has done, so use the largest remaining count of all threads.
-                ck(cudaMemcpy(h_counts256, d_counts256, threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyDeviceToHost), "read counts256 (checkpoint)");
-                uint64_t max_rem[4] = { 0ull, 0ull, 0ull, 0ull };
-                for (uint64_t t = 0; t < threadsTotal; ++t) {
-                    const uint64_t* r = &h_counts256[t * 4];
-                    bool greater = false;
-                    for (int limb = 3; limb >= 0; --limb) {
-                        if (r[limb] != max_rem[limb]) { greater = r[limb] > max_rem[limb]; break; }
+                // A checkpoint must describe what EVERY thread has done. Normally all threads advance in lockstep
+                // (slices_per_launch batches per launch), which is cheap to verify: the hash counter of this run must
+                // then be exactly (batches - resumed batches) * batch size * threads. Only if it is not, copy the
+                // remaining counts back and use the slowest thread (costs about a second per launch).
+                uint64_t step = (uint64_t)slices_per_launch;
+                if (ptb_fits && per_thread_batches[0] - lockstep_batches < step) step = per_thread_batches[0] - lockstep_batches;
+                lockstep_batches += step;
+                uint64_t new_batches = 0ull; bool have = false;
+                unsigned long long h_hash_now = 0ull;
+                ck(cudaMemcpy(&h_hash_now, d_hashes_accum, sizeof(unsigned long long), cudaMemcpyDeviceToHost), "read hashes (checkpoint)");
+                const uint64_t run_batches = lockstep_batches - resume_batches;
+                if (run_batches <= UINT64_MAX / ((uint64_t)B * threadsTotal) &&
+                    (uint64_t)h_hash_now == run_batches * (uint64_t)B * threadsTotal) {
+                    new_batches = lockstep_batches; have = true;
+                } else {
+                    ck(cudaMemcpy(h_counts256, d_counts256, threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyDeviceToHost), "read counts256 (checkpoint)");
+                    uint64_t max_rem[4] = { 0ull, 0ull, 0ull, 0ull };
+                    for (uint64_t t = 0; t < threadsTotal; ++t) {
+                        const uint64_t* r = &h_counts256[t * 4];
+                        bool greater = false;
+                        for (int limb = 3; limb >= 0; --limb) {
+                            if (r[limb] != max_rem[limb]) { greater = r[limb] > max_rem[limb]; break; }
+                        }
+                        if (greater) { max_rem[0] = r[0]; max_rem[1] = r[1]; max_rem[2] = r[2]; max_rem[3] = r[3]; }
                     }
-                    if (greater) { max_rem[0] = r[0]; max_rem[1] = r[1]; max_rem[2] = r[2]; max_rem[3] = r[3]; }
+                    uint64_t done_keys[4];
+                    sub256(per_thread_cnt, max_rem, done_keys);
+                    uint64_t done_batches[4]; uint64_t rr = 0ull;
+                    divmod_256_by_u64(done_keys, (uint64_t)B, done_batches, rr);
+                    if ((done_batches[3] | done_batches[2] | done_batches[1]) == 0ull && rr == 0ull) { new_batches = done_batches[0]; have = true; }
+                    lockstep_batches = new_batches;   // the slowest thread sets the pace from here on
                 }
-                uint64_t done_keys[4];
-                sub256(per_thread_cnt, max_rem, done_keys);
-                uint64_t done_batches[4]; uint64_t rr = 0ull;
-                divmod_256_by_u64(done_keys, (uint64_t)B, done_batches, rr);
-                const bool fits = (done_batches[3] | done_batches[2] | done_batches[1]) == 0ull;
-                if (fits && rr == 0ull && done_batches[0] > batches_done) {
-                    batches_done = done_batches[0];
+                if (have && new_batches > batches_done) {
+                    batches_done = new_batches;
                     // The slowest thread has finished this many batches: resumable with --resume-batches <batches>
                     std::cout << "\nCheckpoint: batches=" << batches_done << " threads=" << threadsTotal
                               << " batch=" << B << "\n";
