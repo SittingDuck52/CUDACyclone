@@ -1,3 +1,74 @@
+#if defined(_WIN32)
+// Windows: MSVC as host compiler has no __int128. Same arithmetic with 64-bit limbs and an explicit carry.
+#ifndef CYC_PORTABLE_CARRY
+#define CYC_PORTABLE_CARRY
+// a + b + cin (cin is 0 or 1), carry out to *cout
+static __host__ __device__ __forceinline__ uint64_t cyc_adc64(uint64_t a, uint64_t b, uint64_t cin, uint64_t* cout) {
+    uint64_t s = a + b;
+    uint64_t c = (s < a) ? 1ull : 0ull;
+    uint64_t r = s + cin;
+    c |= (r < s) ? 1ull : 0ull;
+    *cout = c;
+    return r;
+}
+// a - b - bin (bin is 0 or 1), borrow out to *bout
+static __host__ __device__ __forceinline__ uint64_t cyc_sbb64(uint64_t a, uint64_t b, uint64_t bin, uint64_t* bout) {
+    uint64_t d = a - b;
+    uint64_t o = (a < b) ? 1ull : 0ull;
+    uint64_t r = d - bin;
+    o |= (d < bin) ? 1ull : 0ull;
+    *bout = o;
+    return r;
+}
+#endif
+
+__host__ __forceinline__ void add256_u64(const uint64_t a[4], uint64_t b, uint64_t out[4]) {
+    uint64_t carry = 0;
+    out[0] = cyc_adc64(a[0], b, 0ull, &carry);
+    for (int i = 1; i < 4; ++i) out[i] = cyc_adc64(a[i], 0ull, carry, &carry);
+}
+
+__host__ __forceinline__ void add256(const uint64_t a[4], const uint64_t b[4], uint64_t out[4]) {
+    uint64_t carry = 0;
+    for (int i = 0; i < 4; ++i) out[i] = cyc_adc64(a[i], b[i], carry, &carry);
+}
+
+__host__ __forceinline__ void sub256(const uint64_t a[4], const uint64_t b[4], uint64_t out[4]) {
+    uint64_t borrow = 0;
+    for (int i = 0; i < 4; ++i) {
+        uint64_t bi = b[i] + borrow;
+        if (a[i] < bi) {
+            out[i] = a[i] - bi;   // same as (2^64 + a[i]) - bi
+            borrow = 1;
+        } else {
+            out[i] = a[i] - bi;
+            borrow = 0;
+        }
+    }
+}
+
+__host__ __forceinline__ void inc256(uint64_t a[4], uint64_t inc) {
+    uint64_t carry = 0;
+    a[0] = cyc_adc64(a[0], inc, 0ull, &carry);
+    for (int i = 1; i < 4 && carry; ++i) a[i] = cyc_adc64(a[i], 0ull, carry, &carry);
+}
+
+// Only called at startup (splitting the range): bitwise division of (remainder:value[i]) by divisor
+__host__ void divmod_256_by_u64(const uint64_t value[4], uint64_t divisor, uint64_t quotient[4], uint64_t &remainder) {
+    remainder = 0;
+    for (int i = 3; i >= 0; --i) {
+        uint64_t rem = remainder, q = 0, v = value[i];
+        for (int bit = 63; bit >= 0; --bit) {
+            uint64_t top = rem >> 63;
+            rem = (rem << 1) | ((v >> bit) & 1ull);
+            q <<= 1;
+            if (top || rem >= divisor) { rem -= divisor; q |= 1ull; }
+        }
+        quotient[i] = q;
+        remainder = rem;
+    }
+}
+#else
 __host__ __forceinline__ void add256_u64(const uint64_t a[4], uint64_t b, uint64_t out[4]) {
     __uint128_t sum = (__uint128_t)a[0] + b;
     out[0] = (uint64_t)sum;
@@ -51,6 +122,7 @@ __host__ void divmod_256_by_u64(const uint64_t value[4], uint64_t divisor, uint6
         remainder = (uint64_t)(cur % divisor);
     }
 }
+#endif
 
 bool hexToLE64(const std::string& h_in, uint64_t w[4]) {
     std::string h = h_in;
@@ -81,6 +153,13 @@ std::string formatHex256(const uint64_t limbs[4]) {
     return oss.str();
 }
 
+#if defined(_WIN32)
+__device__ __forceinline__ void inc256_device(uint64_t a[4], uint64_t inc) {
+    uint64_t carry = 0;
+    a[0] = cyc_adc64(a[0], inc, 0ull, &carry);
+    for (int i = 1; i < 4 && carry; ++i) a[i] = cyc_adc64(a[i], 0ull, carry, &carry);
+}
+#else
 __device__ __forceinline__ void inc256_device(uint64_t a[4], uint64_t inc) {
     unsigned __int128 cur = (unsigned __int128)a[0] + inc;
     a[0] = (uint64_t)cur;
@@ -91,6 +170,7 @@ __device__ __forceinline__ void inc256_device(uint64_t a[4], uint64_t inc) {
         carry = (uint64_t)(cur >> 64);
     }
 }
+#endif
 
 static __device__ __forceinline__ uint32_t load_u32_le(const uint8_t* p) {
     return (uint32_t)p[0]

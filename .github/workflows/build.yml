@@ -1,0 +1,57 @@
+name: Build CUDACyclone (Windows, CUDA 12.9)
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/build.yml', '**.cu', '**.h', '**.cuh']
+
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA Toolkit 12.9
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: '12.9.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build
+        run: |
+          New-Item -ItemType Directory out -Force | Out-Null
+          nvcc --version | Tee-Object -FilePath out\build.log
+          # Compute capabilities: 7.5 (RTX 20), 8.6 (RTX 30), 8.9 (RTX 40), 12.0 (RTX 50)
+          $gen   = @('75', '86', '89', '120') | ForEach-Object { '-gencode'; "arch=compute_$_,code=sm_$_" }
+          $flags = @('-O3', '-rdc=true', '-use_fast_math', '--ptxas-options=-O3') + $gen + @('-std=c++17')
+          foreach ($src in 'CUDACyclone', 'CUDAHash') {
+            "=== nvcc $src.cu" | Tee-Object -FilePath out\build.log -Append
+            & nvcc @flags -c "$src.cu" -o "$src.obj" 2>&1 | Tee-Object -FilePath out\build.log -Append
+            if ($LASTEXITCODE -ne 0) { throw "$src.cu: nvcc exit code $LASTEXITCODE" }
+          }
+          "=== link" | Tee-Object -FilePath out\build.log -Append
+          & nvcc @flags CUDACyclone.obj CUDAHash.obj -o out\CUDACyclone.exe -lcudadevrt -cudart=static 2>&1 | Tee-Object -FilePath out\build.log -Append
+          if ($LASTEXITCODE -ne 0) { throw "link: nvcc exit code $LASTEXITCODE" }
+          Get-ChildItem out | Select-Object Name, Length
+
+      - name: Smoke test without GPU (usage text)
+        continue-on-error: true
+        run: |
+          & .\out\CUDACyclone.exe 2>&1 | Tee-Object -FilePath out\build.log -Append
+          "Exit $LASTEXITCODE" | Tee-Object -FilePath out\build.log -Append
+          Get-ChildItem "$env:CUDA_PATH\bin\cudart64_*.dll" | Copy-Item -Destination out
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: CUDACyclone-Windows-CUDA12.9
+          path: out

@@ -200,6 +200,26 @@ apt install cuda-toolkit;
 git clone https://github.com/Dookoo2/CUDACyclone.git
 make
 ```
+
+### Building on Windows
+MSVC, the host compiler of `nvcc` on Windows, has no `__int128`. Under `#if defined(_WIN32)` the affected
+functions in `CUDAMath.h` and `CUDAUtils.h` use 64-bit limbs with an explicit carry instead; the Linux code
+is unchanged. None of these functions is in the hot kernel loop, so speed is not affected.
+
+Easiest way: the GitHub Actions workflow `.github/workflows/build.yml` builds `CUDACyclone.exe` on
+`windows-2022` with CUDA 12.9.1 (Actions → *Build CUDACyclone (Windows, CUDA 12.9)* → artifact).
+
+Manual build: install Visual Studio 2022 (C++ workload) and the CUDA Toolkit 12.x, open a
+*x64 Native Tools* prompt and run the same commands as the workflow. Pick the `-gencode` entries for your
+GPU: 75 = RTX 20, 86 = RTX 30, 89 = RTX 40, 120 = RTX 50.
+```bat
+set FLAGS=-O3 -rdc=true -use_fast_math --ptxas-options=-O3 -gencode arch=compute_86,code=sm_86 -std=c++17
+nvcc %FLAGS% -c CUDACyclone.cu -o CUDACyclone.obj
+nvcc %FLAGS% -c CUDAHash.cu -o CUDAHash.obj
+nvcc %FLAGS% CUDACyclone.obj CUDAHash.obj -o CUDACyclone.exe -lcudadevrt -cudart=static
+```
+Tested with an RTX 5060 Ti (CUDA 12.9.1, driver on Windows 11).
+
 ## 🚧**Version**
 **V1.3**: Full CUDA Kernel rewrite again for preventing key skipping.    
 **V1.2**: Full CUDA Kernel rewrite.  
