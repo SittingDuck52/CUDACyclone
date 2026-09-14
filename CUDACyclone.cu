@@ -133,7 +133,7 @@ __global__ void kernel_point_add_and_check_oneinv(
                         atomicExch(d_found_flag, FOUND_READY);
                     }
                 }
-                __syncwarp(full_mask); WARP_FLUSH_HASHES(); return;
+                __syncwarp(full_mask); if (warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; }   // prefix hit without full match: keep going, returning here skipped keys
             }
         }
 
@@ -216,7 +216,7 @@ __global__ void kernel_point_add_and_check_oneinv(
                             atomicExch(d_found_flag, FOUND_READY);
                         }
                     }
-                    __syncwarp(full_mask); WARP_FLUSH_HASHES(); return;
+                    __syncwarp(full_mask); if (warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; }   // prefix hit without full match: keep going, returning here skipped keys
                 }
             }
 
@@ -261,7 +261,7 @@ __global__ void kernel_point_add_and_check_oneinv(
                             atomicExch(d_found_flag, FOUND_READY);
                         }
                     }
-                    __syncwarp(full_mask); WARP_FLUSH_HASHES(); return;
+                    __syncwarp(full_mask); if (warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; }   // prefix hit without full match: keep going, returning here skipped keys
                 }
             }
 
@@ -317,7 +317,7 @@ __global__ void kernel_point_add_and_check_oneinv(
                         atomicExch(d_found_flag, FOUND_READY);
                     }
                 }
-                __syncwarp(full_mask); WARP_FLUSH_HASHES(); return;
+                __syncwarp(full_mask); if (warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; }   // prefix hit without full match: keep going, returning here skipped keys
             }
 
             uint64_t last_dx[4];
