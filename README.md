@@ -77,6 +77,12 @@ Done. Results in cyclone_tests_results.txt. Successes=848 Failures=0
 - **--target-hash160**: the same as address but hash160.
 - **--grid**: very usefull parameter. Example --grid 512,512 - first 512 - number of points each thread will process in one batch (Points batch size)., second 512 - number of threads in one group (Threads per batch).
 - **--slices**: batch per thread for one kernel launch.
+- **--resume-batches N**: continue an interrupted run. After every completed kernel launch CUDACyclone prints
+  `Checkpoint: batches=<N> threads=<T> batch=<B>`. Start again with the same `--range`, `--address` and `--grid`
+  plus `--resume-batches <N>`; the first N batches of every thread are skipped. All threads advance in lockstep,
+  so this single number describes the whole progress. No checkpoint is printed for a launch in which a key was found.
+- **--resume-threads T**: optional guard for `--resume-batches`. Refuses to start if this run would use a different
+  thread count than the checkpoint (another `--grid` or a GPU with different memory), because N would then mean something else.
 
 ---
 

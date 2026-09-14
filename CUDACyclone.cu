@@ -389,6 +389,9 @@ int main(int argc, char** argv) {
     uint32_t runtime_points_batch_size = 128;
     uint32_t runtime_batches_per_sm    = 8;
     uint32_t slices_per_launch         = 64;
+    uint64_t resume_batches            = 0;      // --resume-batches: batches per thread already done
+    uint64_t resume_threads            = 0;      // --resume-threads: guard, thread layout must match
+    bool     resume_given              = false;
 
     auto parse_grid = [](const std::string& s, uint32_t& a_out, uint32_t& b_out)->bool {
         size_t comma = s.find(',');
@@ -435,11 +438,30 @@ int main(int argc, char** argv) {
             }
             slices_per_launch = (uint32_t)v;
         }
+        else if (arg == "--resume-batches" && i + 1 < argc) {
+            char* endp=nullptr;
+            unsigned long long v = std::strtoull(argv[++i], &endp, 10);
+            if (*endp != '\0') {
+                std::cerr << "Error: --resume-batches expects a non-negative integer.\n";
+                return EXIT_FAILURE;
+            }
+            resume_batches = (uint64_t)v;
+            resume_given = true;
+        }
+        else if (arg == "--resume-threads" && i + 1 < argc) {
+            char* endp=nullptr;
+            unsigned long long v = std::strtoull(argv[++i], &endp, 10);
+            if (*endp != '\0' || v == 0ull) {
+                std::cerr << "Error: --resume-threads expects a positive integer.\n";
+                return EXIT_FAILURE;
+            }
+            resume_threads = (uint64_t)v;
+        }
     }
 
     if (range_hex.empty() || (target_hash_hex.empty() && address_b58.empty())) {
         std::cerr << "Usage: " << argv[0]
-                  << " --range <start_hex>:<end_hex> (--address <base58> | --target-hash160 <hash160_hex>) [--grid A,B] [--slices N]\n";
+                  << " --range <start_hex>:<end_hex> (--address <base58> | --target-hash160 <hash160_hex>) [--grid A,B] [--slices N] [--resume-batches N [--resume-threads T]]\n";
         return EXIT_FAILURE;
     }
     if (!target_hash_hex.empty() && !address_b58.empty()) {
@@ -570,16 +592,47 @@ int main(int argc, char** argv) {
         if (rr != 0ull) { std::cerr << "Internal error: per-thread count is not a multiple of batch size.\n"; return EXIT_FAILURE; }
     }
 
+    // Resume: all threads advance in lockstep (every launch processes the same number of batches per
+    // thread), so the whole progress of a run is one number - batches done per thread. It is only valid
+    // for the same range and the same thread layout (threadsTotal depends on --grid and GPU memory).
+    uint64_t per_thread_batches[4];
+    {   uint64_t rr=0ull;
+        divmod_256_by_u64(per_thread_cnt, (uint64_t)runtime_points_batch_size, per_thread_batches, rr);
+    }
+    const bool ptb_fits = (per_thread_batches[3]|per_thread_batches[2]|per_thread_batches[1]) == 0ull;
+    uint64_t resume_keys = 0ull;   // keys per thread already done
+    if (resume_given) {
+        if (resume_threads != 0ull && resume_threads != threadsTotal) {
+            std::cerr << "Error: --resume-threads " << resume_threads << " does not match the thread count of this run ("
+                      << threadsTotal << "). The checkpoint belongs to another layout (--grid or GPU memory).\n";
+            return EXIT_FAILURE;
+        }
+        if (ptb_fits && resume_batches > per_thread_batches[0]) {
+            std::cerr << "Error: --resume-batches " << resume_batches << " exceeds the batches per thread ("
+                      << per_thread_batches[0] << ").\n";
+            return EXIT_FAILURE;
+        }
+        if (resume_batches > (UINT64_MAX - runtime_points_batch_size) / runtime_points_batch_size) {
+            std::cerr << "Error: --resume-batches too large.\n";
+            return EXIT_FAILURE;
+        }
+        resume_keys = resume_batches * (uint64_t)runtime_points_batch_size;
+    }
+    uint64_t cnt_left[4];
+    {   uint64_t rk[4] = { resume_keys, 0ull, 0ull, 0ull };
+        sub256(per_thread_cnt, rk, cnt_left);
+    }
+
     uint64_t* h_counts256     = nullptr;
     uint64_t* h_start_scalars = nullptr;
     cudaHostAlloc(&h_counts256,     threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
     cudaHostAlloc(&h_start_scalars, threadsTotal * 4 * sizeof(uint64_t), cudaHostAllocWriteCombined | cudaHostAllocMapped);
 
     for (uint64_t i = 0; i < threadsTotal; ++i) {
-        h_counts256[i*4+0] = per_thread_cnt[0];
-        h_counts256[i*4+1] = per_thread_cnt[1];
-        h_counts256[i*4+2] = per_thread_cnt[2];
-        h_counts256[i*4+3] = per_thread_cnt[3];
+        h_counts256[i*4+0] = cnt_left[0];
+        h_counts256[i*4+1] = cnt_left[1];
+        h_counts256[i*4+2] = cnt_left[2];
+        h_counts256[i*4+3] = cnt_left[3];
     }
 
     const uint32_t B = runtime_points_batch_size;
@@ -587,7 +640,7 @@ int main(int argc, char** argv) {
     {
         uint64_t cur[4] = { range_start[0], range_start[1], range_start[2], range_start[3] };
         for (uint64_t i = 0; i < threadsTotal; ++i) {
-            uint64_t Sc[4]; add256_u64(cur, (uint64_t)half, Sc); 
+            uint64_t Sc[4]; add256_u64(cur, (uint64_t)half + resume_keys, Sc);   // skip batches already done 
             h_start_scalars[i*4+0] = Sc[0];
             h_start_scalars[i*4+1] = Sc[1];
             h_start_scalars[i*4+2] = Sc[2];
@@ -711,6 +764,11 @@ int main(int argc, char** argv) {
     std::cout << std::left << std::setw(20) << "Memory utilization"<< " : "
               << std::fixed << std::setprecision(1) << util << "% ("
               << human_bytes((double)usedB) << " / " << human_bytes((double)totalB) << ")\n";
+    if (resume_given) {
+        std::cout << std::left << std::setw(20) << "Resume" << " : " << resume_batches;
+        if (ptb_fits) std::cout << " of " << per_thread_batches[0];
+        std::cout << " batches per thread already done\n";
+    }
     std::cout << "------------------------------------------------------- \n";
     std::cout << std::left << std::setw(20) << "Total threads"     << " : " << (uint64_t)threadsTotal << "\n\n";
     std::cout << "======== Phase-1: BruteForce ==========================\n";
@@ -726,6 +784,8 @@ int main(int argc, char** argv) {
 
     bool stop_all = false;
     bool completed_all = false;
+    uint64_t batches_done = resume_batches;   // per thread, for the checkpoint line
+    const long double resumed_keys_ld = (long double)resume_keys * (long double)threadsTotal;
     while (!stop_all) {
         if (g_sigint) std::cerr << "\n[Ctrl+C] Interrupt received. Finishing current kernel slice and exiting...\n";
 
@@ -758,7 +818,7 @@ int main(int argc, char** argv) {
                 double mkeys = delta / (dt * 1e6);
                 double elapsed = std::chrono::duration<double>(now - t0).count();
                 long double total_keys_ld = ld_from_u256(range_len);
-                long double prog = total_keys_ld > 0.0L ? ((long double)h_hashes / total_keys_ld) * 100.0L : 0.0L;
+                long double prog = total_keys_ld > 0.0L ? ((resumed_keys_ld + (long double)h_hashes) / total_keys_ld) * 100.0L : 0.0L;
                 if (prog > 100.0L) prog = 100.0L;
                 std::cout << "\rTime: " << std::fixed << std::setprecision(1) << elapsed
                           << " s | Speed: " << std::fixed << std::setprecision(1) << mkeys
@@ -781,6 +841,24 @@ int main(int argc, char** argv) {
 
         cudaStreamSynchronize(streamKernel);
         std::cout.flush();
+
+        if (!stop_all) {
+            // A thread that finds the key returns early, so the launch would not be complete.
+            // Never print a checkpoint behind a hit - a resume could otherwise skip the key.
+            int flag_after = 0;
+            ck(cudaMemcpy(&flag_after, d_found_flag, sizeof(int), cudaMemcpyDeviceToHost), "read found_flag (checkpoint)");
+            if (flag_after != FOUND_NONE) {
+                stop_all = true;
+            } else {
+                uint64_t step = (uint64_t)slices_per_launch;
+                if (ptb_fits && per_thread_batches[0] - batches_done < step) step = per_thread_batches[0] - batches_done;
+                batches_done += step;
+                // Every thread has finished this launch: resumable with --resume-batches <batches>
+                std::cout << "\nCheckpoint: batches=" << batches_done << " threads=" << threadsTotal
+                          << " batch=" << B << "\n";
+                std::cout.flush();
+            }
+        }
         if (stop_all || g_sigint) break;
 
         unsigned int h_any = 0u;
