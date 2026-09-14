@@ -850,13 +850,31 @@ int main(int argc, char** argv) {
             if (flag_after != FOUND_NONE) {
                 stop_all = true;
             } else {
-                uint64_t step = (uint64_t)slices_per_launch;
-                if (ptb_fits && per_thread_batches[0] - batches_done < step) step = per_thread_batches[0] - batches_done;
-                batches_done += step;
-                // Every thread has finished this launch: resumable with --resume-batches <batches>
-                std::cout << "\nCheckpoint: batches=" << batches_done << " threads=" << threadsTotal
-                          << " batch=" << B << "\n";
-                std::cout.flush();
+                // Threads do not always advance in lockstep: a thread that returns early (after a hash160
+                // prefix hit without full match) keeps its remaining count for this launch. A checkpoint
+                // must describe what EVERY thread has done, so use the largest remaining count of all threads.
+                ck(cudaMemcpy(h_counts256, d_counts256, threadsTotal * 4 * sizeof(uint64_t), cudaMemcpyDeviceToHost), "read counts256 (checkpoint)");
+                uint64_t max_rem[4] = { 0ull, 0ull, 0ull, 0ull };
+                for (uint64_t t = 0; t < threadsTotal; ++t) {
+                    const uint64_t* r = &h_counts256[t * 4];
+                    bool greater = false;
+                    for (int limb = 3; limb >= 0; --limb) {
+                        if (r[limb] != max_rem[limb]) { greater = r[limb] > max_rem[limb]; break; }
+                    }
+                    if (greater) { max_rem[0] = r[0]; max_rem[1] = r[1]; max_rem[2] = r[2]; max_rem[3] = r[3]; }
+                }
+                uint64_t done_keys[4];
+                sub256(per_thread_cnt, max_rem, done_keys);
+                uint64_t done_batches[4]; uint64_t rr = 0ull;
+                divmod_256_by_u64(done_keys, (uint64_t)B, done_batches, rr);
+                const bool fits = (done_batches[3] | done_batches[2] | done_batches[1]) == 0ull;
+                if (fits && rr == 0ull && done_batches[0] > batches_done) {
+                    batches_done = done_batches[0];
+                    // The slowest thread has finished this many batches: resumable with --resume-batches <batches>
+                    std::cout << "\nCheckpoint: batches=" << batches_done << " threads=" << threadsTotal
+                              << " batch=" << B << "\n";
+                    std::cout.flush();
+                }
             }
         }
         if (stop_all || g_sigint) break;
