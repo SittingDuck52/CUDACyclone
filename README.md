@@ -1,5 +1,13 @@
 # ⚡CUDACyclone: GPU Satoshi Puzzle Solver
 
+> **About this fork.** Upstream is [Dookoo2/CUDACyclone](https://github.com/Dookoo2/CUDACyclone). Added here:
+>
+> - **Windows build** - `__int128` replaced under `_WIN32`, plus a GitHub Actions workflow that produces `CUDACyclone.exe` ([upstream PR #17](https://github.com/Dookoo2/CUDACyclone/pull/17)).
+> - **Resume** - `--resume-batches` / `--resume-threads` continue an interrupted run; a checkpoint is printed every one to two minutes.
+> - **Fix for skipped keys** - a warp could return without saving its state after a hash160 prefix match without a full match, so part of a batch went unchecked while the run still reported "KEY NOT FOUND (exhaustive)" ([upstream PR #16](https://github.com/Dookoo2/CUDACyclone/pull/16)).
+>
+> Used by [Heuhaufen](https://github.com/SittingDuck52/Heuhaufen), a PowerShell dashboard that runs the puzzle search unattended on Windows.
+
 Cyclone CUDA is the GPU-powered version of the **Cyclone** project, designed to achieve extreme performance in solving Satoshi puzzles on modern NVIDIA GPUs.  
 Leveraging **CUDA**, **warp-level parallelism**, and **batch EC operations**, Cyclone CUDA pushes the limits of cryptographic key search.
 
