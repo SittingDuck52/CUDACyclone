@@ -30,8 +30,10 @@ jobs:
         run: |
           New-Item -ItemType Directory out -Force | Out-Null
           nvcc --version | Tee-Object -FilePath out\build.log
-          # Rechenfaehigkeiten: 7.5 (RTX 20), 8.6 (RTX 30), 8.9 (RTX 40), 12.0 (RTX 50)
-          $gen   = @('75', '86', '89', '120') | ForEach-Object { '-gencode'; "arch=compute_$_,code=sm_$_" }
+          # Rechenfaehigkeiten: 5.0/5.2 (GTX 750 Ti, 900), 6.0/6.1 (GTX 10), 7.0 (Titan V), 7.5 (RTX 20, GTX 16),
+          # 8.6 (RTX 30), 8.9 (RTX 40), 12.0 (RTX 50). CUDA 12 kann nichts unter 5.0 - fuer Kepler (3.x)
+          # braeuchte es einen eigenen Build mit CUDA 11.8.
+          $gen   = @('50', '52', '60', '61', '70', '75', '86', '89', '120') | ForEach-Object { '-gencode'; "arch=compute_$_,code=sm_$_" }
           $flags = @('-O3', '-rdc=true', '-use_fast_math', '--ptxas-options=-O3') + $gen + @('-std=c++17')
           foreach ($src in 'CUDACyclone', 'CUDAHash') {
             "=== nvcc $src.cu" | Tee-Object -FilePath out\build.log -Append
